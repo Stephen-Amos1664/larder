@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Larder</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;background:#f4f4f2;color:#222}
+  header{background:#2d5a3d;color:#fff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center}
+  header h1{font-size:20px;margin:0}
+  main{padding:12px;max-width:700px;margin:auto}
+  input,select,button{font-size:16px;padding:10px;border-radius:8px;border:1px solid #bbb;box-sizing:border-box}
+  button{background:#2d5a3d;color:#fff;border:none;cursor:pointer}
+  button.grey{background:#888}
+  button.red{background:#b3261e}
+  .card{background:#fff;border-radius:10px;padding:12px;margin-bottom:12px;box-shadow:0 1px 3px #0002}
+  .row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+  .row>*{flex:1;min-width:120px}
+  h2{font-size:17px;margin:0 0 8px}
+  .item{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid #eee}
+  .item .name{flex:1}
+  .item .detail{font-size:13px;color:#666}
+  .qty{min-width:28px;text-align:center;font-weight:bold}
+  .small{padding:6px 12px}
+  #err{color:#b3261e;margin:8px 0}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+
+<div id="loginView" class="hidden">
+  <main>
+    <div class="card">
+      <h2>Larder login</h2>
+      <div class="row"><input id="email" type="email" placeholder="Email" autocomplete="username"></div>
+      <div class="row"><input id="password" type="password" placeholder="Password" autocomplete="current-password"></div>
+      <div class="row"><button id="loginBtn">Log in</button></div>
+      <div id="err"></div>
+    </div>
+  </main>
+</div>
+
+<div id="appView" class="hidden">
+  <header>
+    <h1>Larder</h1>
+    <button class="grey small" id="logoutBtn">Log out</button>
+  </header>
+  <main>
+    <div class="card">
+      <h2>Add item</h2>
+      <div class="row"><input id="itemName" placeholder="Item name (e.g. Baked beans 400g)"></div>
+      <div class="row">
+        <input id="itemQty" type="number" min="1" value="1" placeholder="Qty">
+        <select id="itemLoc"></select>
+      </div>
+      <div class="row"><input id="itemDetail" placeholder="Notes / position (optional)"></div>
+      <div class="row"><button id="addItemBtn">Add item</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Add location</h2>
+      <div class="row">
+        <input id="locName" placeholder="e.g. Cupboard 3 - Top shelf">
+        <button id="addLocBtn">Add</button>
+      </div>
+      <div id="seedBox" class="row hidden">
+        <button id="seedBtn" class="grey">Create freezer drawers (F1: 4, F2: 4, F3: 8)</button>
+      </div>
+    </div>
+
+    <div id="stock"></div>
+  </main>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot, increment, writeBatch, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA-b9fv9vRmjbxAfrB8czb-sjyNgOTddoM",
+  authDomain: "larder-c7c4f.firebaseapp.com",
+  projectId: "larder-c7c4f",
+  storageBucket: "larder-c7c4f.firebasestorage.app",
+  messagingSenderId: "4822128825",
+  appId: "1:4822128825:web:6233218cd29b779ddfe368"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const $ = id => document.getElementById(id);
+
+let locations = [];
+let items = [];
+let unsubs = [];
+
+// ---------- login ----------
+$("loginBtn").onclick = async () => {
+  $("err").textContent = "";
+  try {
+    await signInWithEmailAndPassword(auth, $("email").value.trim(), $("password").value);
+  } catch (e) {
+    $("err").textContent = "Login failed. Check email and password.";
+  }
+};
+$("logoutBtn").onclick = () => signOut(auth);
+
+onAuthStateChanged(auth, user => {
+  unsubs.forEach(u => u()); unsubs = [];
+  if (user) {
+    $("loginView").classList.add("hidden");
+    $("appView").classList.remove("hidden");
+    unsubs.push(onSnapshot(collection(db, "locations"), snap => {
+      locations = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => (a.order ?? 9999) - (b.order ?? 9999) || a.name.localeCompare(b.name, undefined, {numeric:true}));
+      render();
+    }));
+    unsubs.push(onSnapshot(collection(db, "items"), snap => {
+      items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      render();
+    }));
+  } else {
+    $("appView").classList.add("hidden");
+    $("loginView").classList.remove("hidden");
+  }
+});
+
+// ---------- locations ----------
+$("addLocBtn").onclick = async () => {
+  const name = $("locName").value.trim();
+  if (!name) return;
+  await addDoc(collection(db, "locations"), { name, order: 5000 + locations.length });
+  $("locName").value = "";
+};
+
+$("seedBtn").onclick = async () => {
+  const batch = writeBatch(db);
+  const plan = [["Freezer 1", 4], ["Freezer 2", 4], ["Freezer 3", 8]];
+  let n = 0;
+  plan.forEach(([f, drawers]) => {
+    for (let i = 1; i <= drawers; i++) {
+      batch.set(doc(collection(db, "locations")), { name: `${f} - Drawer ${i}`, order: n++ });
+    }
+  });
+  await batch.commit();
+};
+
+// ---------- items ----------
+$("addItemBtn").onclick = async () => {
+  const name = $("itemName").value.trim();
+  const qty = parseInt($("itemQty").value, 10) || 1;
+  const locationId = $("itemLoc").value;
+  if (!name || !locationId) return;
+  await addDoc(collection(db, "items"), {
+    name, qty, locationId,
+    detail: $("itemDetail").value.trim(),
+    updatedBy: auth.currentUser.email,
+    updatedAt: serverTimestamp()
+  });
+  $("itemName").value = ""; $("itemQty").value = 1; $("itemDetail").value = "";
+};
+
+window.changeQty = async (id, delta, current) => {
+  if (current + delta <= 0) {
+    if (confirm("Quantity would reach 0. Remove this item?")) await deleteDoc(doc(db, "items", id));
+    return;
+  }
+  await updateDoc(doc(db, "items", id), { qty: increment(delta), updatedBy: auth.currentUser.email, updatedAt: serverTimestamp() });
+};
+window.removeItem = async id => {
+  if (confirm("Remove this item?")) await deleteDoc(doc(db, "items", id));
+};
+
+// ---------- render ----------
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function render() {
+  const sel = $("itemLoc");
+  const keep = sel.value;
+  sel.innerHTML = locations.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join("");
+  if (keep) sel.value = keep;
+
+  $("seedBox").classList.toggle("hidden", locations.length > 0);
+
+  $("stock").innerHTML = locations.map(l => {
+    const here = items.filter(i => i.locationId === l.id).sort((a, b) => a.name.localeCompare(b.name));
+    return `<div class="card"><h2>${esc(l.name)}</h2>` +
+      (here.length ? here.map(i => `
+        <div class="item">
+          <div class="name">${esc(i.name)}${i.detail ? `<div class="detail">${esc(i.detail)}</div>` : ""}</div>
+          <button class="small" onclick="changeQty('${i.id}',-1,${i.qty})">-</button>
+          <span class="qty">${i.qty}</span>
+          <button class="small" onclick="changeQty('${i.id}',1,${i.qty})">+</button>
+          <button class="small red" onclick="removeItem('${i.id}')">x</button>
+        </div>`).join("") : `<div class="detail">Empty</div>`) +
+      `</div>`;
+  }).join("");
+}
+</script>
+</body>
+</html>
