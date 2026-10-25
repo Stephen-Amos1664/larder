@@ -56,6 +56,7 @@
       <div class="row"><button id="scanAddBtn">Scan to add</button><button id="scanRemBtn" class="grey">Scan to remove</button></div>
       <div class="row"><input id="itemName" placeholder="Item name (e.g. Baked beans 400g)"></div>
       <div class="row"><input id="itemBarcode" inputmode="numeric" placeholder="Barcode (filled by scan, blank if none)"></div>
+      <div id="scanNote" style="color:#b3261e;font-weight:bold;margin-bottom:8px"></div>
       <div class="row">
         <input id="itemQty" type="number" min="1" value="1" placeholder="Qty">
         <select id="itemLoc"></select>
@@ -168,7 +169,7 @@ $("addItemBtn").onclick = async () => {
   const locationId = $("itemLoc").value;
   const barcode = $("itemBarcode").value.trim();
   if (!name || !locationId) return;
-  const clearForm = () => { $("itemName").value = ""; $("itemQty").value = 1; $("itemDetail").value = ""; $("itemBarcode").value = ""; };
+  const clearForm = () => { $("itemName").style.border = ""; $("scanNote").textContent = ""; $("itemName").value = ""; $("itemQty").value = 1; $("itemDetail").value = ""; $("itemBarcode").value = ""; };
   if (barcode) {
     await setDoc(doc(db, "products", barcode), { name });
     const same = items.find(i => i.barcode === barcode && i.locationId === locationId);
@@ -247,8 +248,16 @@ async function onCode(code) {
     await closeScan();
     $("itemBarcode").value = code;
     const name = await lookupName(code);
-    if (name) { $("itemName").value = name; }
-    else { alert("Barcode not found. Type the name once and it will be remembered."); $("itemName").focus(); }
+    const nm = $("itemName");
+    if (name) {
+      nm.value = name; nm.style.border = ""; $("scanNote").textContent = "";
+    } else {
+      nm.value = "";
+      nm.style.border = "3px solid #b3261e";
+      $("scanNote").textContent = "Barcode not recognised. Type the item name in the red box above, choose the location, then tap Add item. It will be remembered next time.";
+      nm.scrollIntoView({ behavior: "smooth", block: "center" });
+      setTimeout(() => nm.focus(), 400);
+    }
     return;
   }
   const matches = items.filter(i => i.barcode === code);
