@@ -175,6 +175,7 @@ $("addItemBtn").onclick = async () => {
     const same = items.find(i => i.barcode === barcode && i.locationId === locationId);
     if (same) {
       await updateDoc(doc(db, "items", same.id), { qty: increment(qty), updatedBy: auth.currentUser.email, updatedAt: serverTimestamp() });
+      await logMove(same, qty, "add");
       clearForm();
       return;
     }
@@ -185,18 +186,39 @@ $("addItemBtn").onclick = async () => {
     updatedBy: auth.currentUser.email,
     updatedAt: serverTimestamp()
   });
+  await logMove({ name, barcode, locationId }, qty, "add");
   clearForm();
 };
 
+// every stock movement is logged so usage can be learned later
+// type: "add" (stock in), "use" (stock used), "delete" (item removed, not counted as use)
+async function logMove(item, delta, type) {
+  try {
+    await addDoc(collection(db, "log"), {
+      name: item.name, barcode: item.barcode || "", locationId: item.locationId,
+      delta, type, by: auth.currentUser.email, at: serverTimestamp()
+    });
+  } catch (e) { console.error("log failed", e); }
+}
+
 window.changeQty = async (id, delta, current) => {
+  const item = items.find(i => i.id === id);
   if (current + delta <= 0) {
-    if (confirm("Quantity would reach 0. Remove this item?")) await deleteDoc(doc(db, "items", id));
+    if (confirm("Quantity would reach 0. Remove this item?")) {
+      await deleteDoc(doc(db, "items", id));
+      if (item) await logMove(item, -current, "use");
+    }
     return;
   }
   await updateDoc(doc(db, "items", id), { qty: increment(delta), updatedBy: auth.currentUser.email, updatedAt: serverTimestamp() });
+  if (item) await logMove(item, delta, delta > 0 ? "add" : "use");
 };
 window.removeItem = async id => {
-  if (confirm("Remove this item?")) await deleteDoc(doc(db, "items", id));
+  const item = items.find(i => i.id === id);
+  if (confirm("Remove this item?")) {
+    await deleteDoc(doc(db, "items", id));
+    if (item) await logMove(item, -item.qty, "delete");
+  }
 };
 
 // ---------- scanner ----------
