@@ -23,7 +23,12 @@
   .qty{min-width:28px;text-align:center;font-weight:bold}
   .small{padding:6px 12px}
   #err{color:#b3261e;margin:8px 0}
-  .hidden{display:none}
+  #scanOverlay{position:fixed;inset:0;background:#000e;z-index:10;padding:12px;display:flex;flex-direction:column;gap:10px}
+  #reader{background:#000;border-radius:10px;overflow:hidden}
+  #scanMsg{color:#fff;text-align:center}
+  #pickList{background:#fff;border-radius:10px;padding:12px}
+  #pickList button{display:block;width:100%;margin-bottom:8px}
+  .hidden{display:none !important}
 </style>
 </head>
 <body>
@@ -48,7 +53,9 @@
   <main>
     <div class="card">
       <h2>Add item</h2>
+      <div class="row"><button id="scanAddBtn">Scan to add</button><button id="scanRemBtn" class="grey">Scan to remove</button></div>
       <div class="row"><input id="itemName" placeholder="Item name (e.g. Baked beans 400g)"></div>
+      <div class="row"><input id="itemBarcode" inputmode="numeric" placeholder="Barcode (filled by scan, blank if none)"></div>
       <div class="row">
         <input id="itemQty" type="number" min="1" value="1" placeholder="Qty">
         <select id="itemLoc"></select>
@@ -72,10 +79,18 @@
   </main>
 </div>
 
+<div id="scanOverlay" class="hidden">
+  <div id="reader"></div>
+  <div id="scanMsg"></div>
+  <div id="pickList" class="hidden"></div>
+  <button id="scanCancel" class="grey">Cancel</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot, increment, writeBatch, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, addDoc, deleteDoc, updateDoc, doc, onSnapshot, increment, writeBatch, serverTimestamp, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA-b9fv9vRmjbxAfrB8czb-sjyNgOTddoM",
@@ -151,14 +166,25 @@ $("addItemBtn").onclick = async () => {
   const name = $("itemName").value.trim();
   const qty = parseInt($("itemQty").value, 10) || 1;
   const locationId = $("itemLoc").value;
+  const barcode = $("itemBarcode").value.trim();
   if (!name || !locationId) return;
+  const clearForm = () => { $("itemName").value = ""; $("itemQty").value = 1; $("itemDetail").value = ""; $("itemBarcode").value = ""; };
+  if (barcode) {
+    await setDoc(doc(db, "products", barcode), { name });
+    const same = items.find(i => i.barcode === barcode && i.locationId === locationId);
+    if (same) {
+      await updateDoc(doc(db, "items", same.id), { qty: increment(qty), updatedBy: auth.currentUser.email, updatedAt: serverTimestamp() });
+      clearForm();
+      return;
+    }
+  }
   await addDoc(collection(db, "items"), {
-    name, qty, locationId,
+    name, qty, locationId, barcode,
     detail: $("itemDetail").value.trim(),
     updatedBy: auth.currentUser.email,
     updatedAt: serverTimestamp()
   });
-  $("itemName").value = ""; $("itemQty").value = 1; $("itemDetail").value = "";
+  clearForm();
 };
 
 window.changeQty = async (id, delta, current) => {
@@ -171,6 +197,85 @@ window.changeQty = async (id, delta, current) => {
 window.removeItem = async id => {
   if (confirm("Remove this item?")) await deleteDoc(doc(db, "items", id));
 };
+
+// ---------- scanner ----------
+let scanner = null, scanMode = null, handling = false;
+
+async function lookupName(code) {
+  try {
+    const own = await getDoc(doc(db, "products", code));
+    if (own.exists()) return own.data().name;
+  } catch (e) {}
+  try {
+    const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json?fields=product_name,brands,quantity`);
+    const j = await r.json();
+    if (j.status === 1 && j.product) {
+      const p = j.product;
+      return [p.brands ? p.brands.split(",")[0] : "", p.product_name, p.quantity].filter(Boolean).join(" ").trim();
+    }
+  } catch (e) {}
+  return "";
+}
+
+async function startScan(mode) {
+  scanMode = mode; handling = false;
+  $("scanOverlay").classList.remove("hidden");
+  $("pickList").classList.add("hidden");
+  $("scanMsg").textContent = mode === "add" ? "Scan item to ADD" : "Scan item to REMOVE";
+  scanner = new Html5Qrcode("reader");
+  try {
+    await scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 260, height: 140 } }, onCode, () => {});
+  } catch (e) {
+    $("scanMsg").textContent = "Camera failed: " + e;
+  }
+}
+
+async function stopScan() {
+  try { if (scanner) { await scanner.stop(); scanner.clear(); } } catch (e) {}
+  scanner = null;
+}
+async function closeScan() {
+  await stopScan();
+  $("scanOverlay").classList.add("hidden");
+}
+
+async function onCode(code) {
+  if (handling) return;
+  handling = true;
+  await stopScan();
+  if (scanMode === "add") {
+    await closeScan();
+    $("itemBarcode").value = code;
+    const name = await lookupName(code);
+    if (name) { $("itemName").value = name; }
+    else { alert("Barcode not found. Type the name once and it will be remembered."); $("itemName").focus(); }
+    return;
+  }
+  const matches = items.filter(i => i.barcode === code);
+  if (matches.length === 0) {
+    await closeScan();
+    alert("Not in stock: " + code);
+  } else if (matches.length === 1) {
+    await closeScan();
+    await changeQty(matches[0].id, -1, matches[0].qty);
+  } else {
+    $("scanMsg").textContent = "Take one from which location?";
+    const box = $("pickList");
+    box.innerHTML = "";
+    matches.forEach(m => {
+      const loc = locations.find(l => l.id === m.locationId);
+      const b = document.createElement("button");
+      b.textContent = `${m.name} - ${loc ? loc.name : "?"} (${m.qty})`;
+      b.onclick = async () => { await closeScan(); await changeQty(m.id, -1, m.qty); };
+      box.appendChild(b);
+    });
+    box.classList.remove("hidden");
+  }
+}
+
+$("scanAddBtn").onclick = () => startScan("add");
+$("scanRemBtn").onclick = () => startScan("remove");
+$("scanCancel").onclick = closeScan;
 
 // ---------- render ----------
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
